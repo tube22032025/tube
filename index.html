@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tải Video YouTube</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .form-buttons {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+        .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn-secondary {
+            background-color: #f1f1f1;
+            color: #333;
+            padding: 10px 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn-primary:hover {
+            background-color: #45a049;
+        }
+        .btn-secondary:hover {
+            background-color: #e7e7e7;
+        }
+        .file-info {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+            display: none;
+        }
+        .progress-bar {
+            height: 20px;
+            background-color: #f1f1f1;
+            border-radius: 4px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .progress {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .error {
+            color: #d9534f;
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8d7da;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            color: #3c763d;
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #dff0d8;
+            border-radius: 4px;
+            display: none;
+        }
+        .video-preview {
+            margin-top: 15px;
+            text-align: center;
+        }
+        .video-preview img {
+            max-width: 100%;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tải Video YouTube</h1>
+        <p>Hỗ trợ tải video YouTube với độ phân giải 720p và 1080p. File sẽ bị xóa sau 2 giờ.</p>
+        
+        <form id="uploadForm">
+            <div class="form-group">
+                <label for="url">URL Video YouTube:</label>
+                <input type="text" id="url" name="url" placeholder="Nhập URL video YouTube" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="resolution">Độ phân giải:</label>
+                <select id="resolution" name="resolution">
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                </select>
+            </div>
+            
+            <div class="form-buttons">
+                <button type="submit" id="submitBtn" class="btn btn-primary">Tải video</button>
+                <button type="button" id="resetBtn" class="btn btn-secondary">Làm mới</button>
+            </div>
+        </form>
+        
+        <div class="file-info" id="fileInfo">
+            <p class="file-name"><strong>Tên file:</strong> <span id="fileName">video.mp4</span></p>
+            <p class="file-size"><strong>Dung lượng:</strong> <span id="fileSize">Đang tính...</span></p>
+            <p class="file-resolution"><strong>Độ phân giải:</strong> <span id="fileResolution">720p</span></p>
+            <div class="progress-bar" id="progressBar">
+                <div class="progress" id="progress"></div>
+            </div>
+            <p class="upload-status" id="uploadStatus">Đang chuẩn bị tải...</p>
+            
+            <div class="video-preview" id="filePreview"></div>
+        </div>
+        
+        <div class="error" id="errorMessage"></div>
+        <div class="success" id="successMessage"></div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('uploadForm');
+            const fileInfo = document.getElementById('fileInfo');
+            const errorMessage = document.getElementById('errorMessage');
+            const successMessage = document.getElementById('successMessage');
+            const progress = document.getElementById('progress');
+            const uploadStatus = document.getElementById('uploadStatus');
+            const resetBtn = document.getElementById('resetBtn');
+            const urlInput = document.getElementById('url');
+            
+            // Hiển thị thông tin video khi nhập URL
+            urlInput.addEventListener('input', function() {
+                const url = urlInput.value.trim();
+                if (isValidYoutubeUrl(url)) {
+                    getVideoInfo(url);
+                }
+            });
+            
+            // Xử lý sự kiện submit form
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const url = document.getElementById('url').value.trim();
+                const resolution = document.getElementById('resolution').value;
+                
+                if (!url) {
+                    showError('Vui lòng nhập URL video YouTube');
+                    return;
+                }
+                
+                if (!isValidYoutubeUrl(url)) {
+                    showError('URL không hợp lệ. Vui lòng nhập URL YouTube hợp lệ');
+                    return;
+                }
+                
+                // Hiển thị thông tin file
+                fileInfo.style.display = 'block';
+                errorMessage.style.display = 'none';
+                successMessage.style.display = 'none';
+                
+                // Cập nhật trạng thái
+                uploadStatus.textContent = 'Đang tải video, vui lòng đợi...';
+                progress.style.width = '10%';
+                
+                // Gửi yêu cầu tải video
+                const formData = new FormData();
+                formData.append('url', url);
+                formData.append('resolution', resolution);
+                
+                fetch('/download', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    progress.style.width = '100%';
+                    
+                    if (data.error) {
+                        showError(data.error);
+                        uploadStatus.textContent = 'Tải video thất bại';
+                        return;
+                    }
+                    
+                    if (data.success && data.video) {
+                        const video = data.video;
+                        document.getElementById('fileName').textContent = video.title;
+                        document.getElementById('fileSize').textContent = video.size;
+                        document.getElementById('fileResolution').textContent = video.resolution;
+                        uploadStatus.textContent = 'Tải video thành công!';
+                        
+                        // Hiển thị thông báo thành công
+                        successMessage.innerHTML = `
+                            <p>Video đã được tải thành công!</p>
+                            <p><strong>Tên:</strong> ${video.title}</p>
+                            <p><strong>Kích thước:</strong> ${video.size}</p>
+                            <p><strong>Độ phân giải:</strong> ${video.resolution}</p>
+                            <p><a href="${video.download_url}" class="btn btn-primary" download>Tải xuống video</a></p>
+                        `;
+                        successMessage.style.display = 'block';
+                    }
+                })
+                .catch(error => {
+                    progress.style.width = '0%';
+                    uploadStatus.textContent = 'Tải video thất bại';
+                    showError('Đã xảy ra lỗi khi tải video: ' + error.message);
+                });
+            });
+            
+            // Xử lý nút làm mới
+            resetBtn.addEventListener('click', function() {
+                // Hiển thị hộp thoại xác nhận trước khi làm mới
+                if (formHasData() && confirm('Bạn có chắc muốn xóa tất cả thông tin đã nhập?')) {
+                    resetForm();
+                } else if (!formHasData()) {
+                    resetForm();
+                }
+            });
+            
+            // Kiểm tra URL YouTube hợp lệ
+            function isValidYoutubeUrl(url) {
+                const regex = /^(https?\:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/;
+                return regex.test(url);
+            }
+            
+            // Hiển thị thông báo lỗi
+            function showError(message) {
+                errorMessage.textContent = message;
+                errorMessage.style.display = 'block';
+                successMessage.style.display = 'none';
+            }
+            
+            // Kiểm tra form có dữ liệu hay không
+            function formHasData() {
+                return urlInput.value.trim() !== '';
+            }
+            
+            // Làm mới form
+            function resetForm() {
+                form.reset();
+                fileInfo.style.display = 'none';
+                errorMessage.style.display = 'none';
+                successMessage.style.display = 'none';
+                progress.style.width = '0%';
+                document.getElementById('filePreview').innerHTML = '';
+            }
+            
+            // Lấy thông tin video từ URL
+            function getVideoInfo(url) {
+                const formData = new FormData();
+                formData.append('url', url);
+                
+                fetch('/get_file_info', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        return;
+                    }
+                    
+                    if (data.success && data.video_info) {
+                        const videoInfo = data.video_info;
+                        fileInfo.style.display = 'block';
+                        document.getElementById('fileName').textContent = videoInfo.title;
+                        document.getElementById('fileResolution').textContent = 'Đang tải thông tin...';
+                        
+                        // Hiển thị thumbnail
+                        if (videoInfo.thumbnail_url) {
+                            document.getElementById('filePreview').innerHTML = `
+                                <img src="${videoInfo.thumbnail_url}" alt="${videoInfo.title}">
+                                <p>Thời lượng: ${videoInfo.formatted_length}</p>
+                            `;
+                        }
+                        
+                        // Hiển thị thông tin stream có sẵn
+                        if (videoInfo.available_streams && videoInfo.available_streams.length > 0) {
+                            const stream = videoInfo.available_streams[0];
+                            document.getElementById('fileSize').textContent = stream.estimated_size;
+                        } else {
+                            document.getElementById('fileSize').textContent = 'Không xác định';
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Lỗi khi lấy thông tin video:', error);
+                });
+            }
+        });
+    </script>
+</body>
+</html>
