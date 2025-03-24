@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Ứng dụng tải video YouTube
-Hỗ trợ tải video với độ phân giải 720p và 1080p
-Tự động xóa file sau 2 giờ để tiết kiệm không gian ổ đĩa
-"""
-
 import os
 import uuid
 import logging
 import time
 import re
 import shutil
-import subprocess
 from datetime import datetime
 from flask import Flask, request, render_template, send_from_directory, jsonify, url_for
 from werkzeug.utils import secure_filename
@@ -51,6 +44,7 @@ app = Flask(__name__)
 
 FILE_CLEANUP_THRESHOLD = 7200  # Xóa file sau 2 giờ (7200 giây)
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', 5))  # Số lượng worker tối đa cho tải song song
+MAX_REQUESTS_PER_MINUTE = 30  # Giới hạn số yêu cầu mỗi phút
 
 app.config.update(
     DOWNLOAD_FOLDER=os.environ.get('DOWNLOAD_FOLDER', 'downloads'),
@@ -65,96 +59,83 @@ app.config.update(
 for folder in [app.config['DOWNLOAD_FOLDER'], app.config['TEMP_FOLDER']]:
     os.makedirs(folder, exist_ok=True)
 
+# Biến toàn cục để theo dõi số lượng yêu cầu
+request_count = 0
+last_request_time = time.time()
+
 def get_disk_usage_percent(path):
     """Lấy phần trăm sử dụng của ổ đĩa chứa path"""
     try:
-        # Cách 1: Sử dụng thư viện shutil (cross-platform)
         total, used, free = shutil.disk_usage(path)
         return (used / total) * 100
-    except:
-        try:
-            # Cách 2: Sử dụng lệnh df trên Linux/Mac
-            result = subprocess.run(['df', path], capture_output=True, text=True)
-            output = result.stdout.strip().split('\n')
-            if len(output) >= 2:
-                usage_percent = output[1].split()[4].replace('%', '')
-                return float(usage_percent)
-        except:
-            logger.error("Không thể lấy thông tin dung lượng ổ đĩa", exc_info=True)
-            return 0
+    except Exception as e:
+        logger.error("Không thể lấy thông tin dung lượng ổ đĩa", exc_info=True)
+        return 0
 
 def is_valid_youtube_url(url):
     youtube_regex = r'^(https?\:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$'
     return re.match(youtube_regex, url) is not None
 
 def generate_unique_filename(title):
-    # Sử dụng phương pháp an toàn để tạo tên file
     safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
     safe_title = safe_title.replace(' ', '_')
     return f"{safe_title}_{uuid.uuid4().hex[:8]}"
 
 def format_file_size(size_bytes):
-    """
-    Cải thiện hàm hiển thị kích thước file với độ chính xác cao hơn
-    """
+    """Cải thiện hàm hiển thị kích thước file với độ chính xác cao hơn"""
     if size_bytes < 0:
         return "0 B"
-        
     units = ['B', 'KB', 'MB', 'GB', 'TB']
     i = 0
     while size_bytes >= 1024.0 and i < len(units) - 1:
         size_bytes /= 1024.0
         i += 1
-    
-    # Hiển thị với 2 số thập phân cho độ chính xác
     return f"{size_bytes:.2f} {units[i]}"
 
 def download_youtube_video(url, resolution='720p'):
+    global request_count, last_request_time
+
+    # Kiểm tra giới hạn tốc độ
+    current_time = time.time()
+    elapsed_time = current_time - last_request_time
+    if request_count >= MAX_REQUESTS_PER_MINUTE and elapsed_time < 60:
+        sleep_time = 60 - elapsed_time
+        logger.info(f"Đã đạt giới hạn tốc độ. Chờ {sleep_time:.2f} giây...")
+        time.sleep(sleep_time)
+    if elapsed_time >= 60:
+        request_count = 0
+        last_request_time = current_time
+
     try:
         logger.info(f"Bắt đầu tải video từ URL: {url} với độ phân giải {resolution}")
-        
-        if USING_PYTUBEFIX:
-            yt = YouTube(url, use_oauth=True, allow_oauth_cache=True, on_progress_callback=on_progress)
-        else:
-            yt = YouTube(url, use_oauth=True, allow_oauth_cache=True)
-        
+        yt_args = {'use_oauth': True, 'allow_oauth_cache': True}
+
+        yt = YouTube(url, **yt_args)
         video_title = yt.title
         logger.info(f"Đã tìm thấy video: {video_title}")
-        
+
         safe_filename = generate_unique_filename(video_title)
-        
-        # Tìm stream video phù hợp
-        video_stream = None
-        if resolution == '1080p':
-            video_stream = yt.streams.filter(progressive=True, file_extension='mp4', res='1080p').first()
-            if not video_stream:
-                logger.info("Không tìm thấy stream 1080p progressive, tìm kiếm stream 1080p không progressive")
-                video_stream = yt.streams.filter(file_extension='mp4', res='1080p').first()
-        
-        if resolution == '720p' or not video_stream:
-            logger.info("Tìm kiếm stream 720p progressive")
-            video_stream = yt.streams.filter(progressive=True, file_extension='mp4', res='720p').first()
-        
-        if not video_stream:
-            logger.info("Không tìm thấy stream theo yêu cầu, sử dụng stream có độ phân giải cao nhất")
-            video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-        
+
+        # Tìm stream video phù hợp theo độ phân giải yêu cầu
+        video_streams = yt.streams.filter(progressive=True, file_extension='mp4')
+        video_stream = video_streams.filter(res=resolution).first() or video_streams.order_by('resolution').desc().first()
+
         if not video_stream:
             logger.error("Không tìm thấy stream video phù hợp")
             return None, "Không tìm thấy stream video phù hợp"
-        
-        logger.info(f"Đã tìm thấy stream với độ phân giải: {video_stream.resolution}")
-        
+
         output_path = os.path.join(app.config['DOWNLOAD_FOLDER'], f"{safe_filename}.mp4")
-        
+
         # Tải video
         start_time = time.time()
         video_stream.download(output_path=app.config['DOWNLOAD_FOLDER'], filename=f"{safe_filename}.mp4")
         download_time = time.time() - start_time
-        
+
         file_size = os.path.getsize(output_path)
+        request_count += 1
+
         logger.info(f"Đã tải xong video ({format_file_size(file_size)}) trong {download_time:.2f} giây")
-        
+
         return {
             "title": video_title,
             "filename": f"{safe_filename}.mp4",
@@ -165,33 +146,21 @@ def download_youtube_video(url, resolution='720p'):
             "url": url,
             "download_time": f"{download_time:.2f} giây"
         }, None
-        
+
     except Exception as e:
         logger.error(f"Lỗi khi tải video: {str(e)}", exc_info=True)
-        error_message = str(e)
-        
-        if "HTTP Error 400" in error_message:
-            return None, "Lỗi kết nối đến YouTube. Vui lòng thử lại sau hoặc kiểm tra URL"
-        elif "detected as a bot" in error_message:
-            return None, "YouTube phát hiện yêu cầu là bot. Vui lòng thử lại sau"
-        
-        return None, f"Lỗi khi tải video: {error_message}"
+        return None, f"Lỗi khi tải video: {str(e)}"
 
 def cleanup_old_files():
     try:
         threshold = app.config['FILE_CLEANUP_THRESHOLD']
         current_time = time.time()
-        files_removed = 0
-        total_space_freed = 0
-        
-        # Kiểm tra dung lượng ổ đĩa
         disk_usage = get_disk_usage_percent(app.config['DOWNLOAD_FOLDER'])
         logger.info(f"Dung lượng ổ đĩa hiện tại: {disk_usage:.1f}%")
-        
-        # Nếu dung lượng ổ đĩa >= 50%, xóa tất cả file .mp4
+        files_removed, total_space_freed = 0, 0
+
         if disk_usage >= 50:
             logger.warning(f"Dung lượng ổ đĩa đã đạt {disk_usage:.1f}%, bắt đầu xóa tất cả file .mp4")
-            
             for folder in [app.config['DOWNLOAD_FOLDER'], app.config['TEMP_FOLDER']]:
                 for filename in os.listdir(folder):
                     if filename.endswith('.mp4'):
@@ -202,30 +171,26 @@ def cleanup_old_files():
                             files_removed += 1
                             total_space_freed += file_size
                             logger.info(f"Đã xóa file do ổ đĩa đầy: {file_path} (kích thước: {format_file_size(file_size)})")
-            
             logger.warning(f"Đã xóa {files_removed} file .mp4, giải phóng {format_file_size(total_space_freed)} do ổ đĩa đạt ngưỡng 50%")
-            return files_removed, total_space_freed
-        
-        # Nếu không, xóa file cũ theo thời gian như bình thường
-        for folder in [app.config['DOWNLOAD_FOLDER'], app.config['TEMP_FOLDER']]:
-            for filename in os.listdir(folder):
-                file_path = os.path.join(folder, filename)
-                if os.path.isfile(file_path):
-                    file_age = current_time - os.path.getmtime(file_path)
-                    if file_age > threshold:
-                        file_size = os.path.getsize(file_path)
-                        os.remove(file_path)
-                        files_removed += 1
-                        total_space_freed += file_size
-                        logger.info(f"Đã xóa file cũ: {file_path} (kích thước: {format_file_size(file_size)})")
-        
-        logger.info(f"Tổng cộng đã xóa {files_removed} file, giải phóng {format_file_size(total_space_freed)}")
+        else:
+            for folder in [app.config['DOWNLOAD_FOLDER'], app.config['TEMP_FOLDER']]:
+                for filename in os.listdir(folder):
+                    file_path = os.path.join(folder, filename)
+                    if os.path.isfile(file_path):
+                        file_age = current_time - os.path.getmtime(file_path)
+                        if file_age > threshold:
+                            file_size = os.path.getsize(file_path)
+                            os.remove(file_path)
+                            files_removed += 1
+                            total_space_freed += file_size
+                            logger.info(f"Đã xóa file cũ: {file_path} (kích thước: {format_file_size(file_size)})")
+            logger.info(f"Tổng cộng đã xóa {files_removed} file, giải phóng {format_file_size(total_space_freed)}")
         return files_removed, total_space_freed
     except Exception as e:
         logger.error(f"Lỗi khi dọn dẹp file: {str(e)}", exc_info=True)
         return 0, 0
 
-# Lập lịch tự động dọn dẹp file
+# Lập lịch tự động dọn dẹp file mỗi 30 phút
 scheduler = BackgroundScheduler()
 scheduler.add_job(cleanup_old_files, 'interval', minutes=30)
 scheduler.start()
@@ -247,22 +212,15 @@ def download_video():
     try:
         url = request.form.get('url')
         resolution = request.form.get('resolution', '720p')
-        
-        if not url:
-            return jsonify({"error": "Vui lòng nhập URL video YouTube"}), 400
-            
-        if not is_valid_youtube_url(url):
+
+        if not url or not is_valid_youtube_url(url):
             return jsonify({"error": "URL không hợp lệ. Vui lòng nhập URL YouTube hợp lệ"}), 400
-            
+
         video_info, error = download_youtube_video(url, resolution)
         
         if error:
-            if "HTTP Error 400" in error:
-                return jsonify({"error": "Lỗi kết nối đến YouTube. Vui lòng thử lại sau hoặc kiểm tra URL"}), 400
-            if "detected as a bot" in error:
-                return jsonify({"error": "YouTube phát hiện yêu cầu là bot. Vui lòng thử lại sau"}), 400
             return jsonify({"error": error}), 400
-            
+
         return jsonify({
             "success": True,
             "video": {
@@ -274,91 +232,17 @@ def download_video():
                 "download_url": url_for('get_video', filename=video_info["filename"])
             }
         })
-        
     except Exception as e:
         logger.error(f"Lỗi không xác định: {str(e)}", exc_info=True)
         return jsonify({"error": f"Đã xảy ra lỗi: {str(e)}"}), 500
 
-@app.route('/videos/<filename>')
+@app.route('/videos/<path:filename>')
 def get_video(filename):
     return send_from_directory(
         directory=app.config['DOWNLOAD_FOLDER'],
         path=filename,
         as_attachment=True
     )
-
-@app.route('/status')
-def server_status():
-    try:
-        # Thông tin về server
-        download_folder_size = sum(os.path.getsize(os.path.join(app.config['DOWNLOAD_FOLDER'], f)) 
-                                for f in os.listdir(app.config['DOWNLOAD_FOLDER']) 
-                                if os.path.isfile(os.path.join(app.config['DOWNLOAD_FOLDER'], f)))
-        
-        temp_folder_size = sum(os.path.getsize(os.path.join(app.config['TEMP_FOLDER'], f)) 
-                            for f in os.listdir(app.config['TEMP_FOLDER']) 
-                            if os.path.isfile(os.path.join(app.config['TEMP_FOLDER'], f)))
-        
-        download_files = len([f for f in os.listdir(app.config['DOWNLOAD_FOLDER']) 
-                            if os.path.isfile(os.path.join(app.config['DOWNLOAD_FOLDER'], f))])
-        
-        disk_usage = get_disk_usage_percent(app.config['DOWNLOAD_FOLDER'])
-        
-        return jsonify({
-            "status": "online",
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "download_folder_size": format_file_size(download_folder_size),
-            "temp_folder_size": format_file_size(temp_folder_size),
-            "download_files": download_files,
-            "disk_usage": f"{disk_usage:.1f}%",
-            "using_pytubefix": USING_PYTUBEFIX
-        })
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy trạng thái server: {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-@app.route('/get_file_info', methods=['POST'])
-def get_file_info():
-    """API endpoint để lấy thông tin file từ URL YouTube trước khi tải"""
-    try:
-        url = request.form.get('url')
-        
-        if not url:
-            return jsonify({"error": "Vui lòng nhập URL video YouTube"}), 400
-            
-        if not is_valid_youtube_url(url):
-            return jsonify({"error": "URL không hợp lệ. Vui lòng nhập URL YouTube hợp lệ"}), 400
-        
-        # Chỉ lấy thông tin cơ bản mà không tải video
-        if USING_PYTUBEFIX:
-            yt = YouTube(url, use_oauth=True, allow_oauth_cache=True)
-        else:
-            yt = YouTube(url, use_oauth=True, allow_oauth_cache=True)
-        
-        # Lấy thông tin các stream có sẵn
-        available_streams = []
-        for stream in yt.streams.filter(progressive=True, file_extension='mp4'):
-            available_streams.append({
-                "resolution": stream.resolution,
-                "mime_type": stream.mime_type,
-                "estimated_size": format_file_size(stream.filesize) if hasattr(stream, 'filesize') else "Không xác định"
-            })
-        
-        return jsonify({
-            "success": True,
-            "video_info": {
-                "title": yt.title,
-                "author": yt.author,
-                "length": yt.length,
-                "formatted_length": f"{yt.length // 60}:{yt.length % 60:02d}",
-                "thumbnail_url": yt.thumbnail_url,
-                "available_streams": available_streams
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy thông tin video: {str(e)}", exc_info=True)
-        return jsonify({"error": f"Không thể lấy thông tin video: {str(e)}"}), 500
 
 @app.errorhandler(404)
 def page_not_found(error):
